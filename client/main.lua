@@ -147,12 +147,17 @@ end
 
 -- ✅ Enhanced animal shop interface
 function openAnimalShop()
-    local ownedLots = lib.callback.await('animal_farming:server:getFarmlots', false)
-    
-    if not ownedLots or #ownedLots == 0 then
-        notify('You need to own a farmlot first!', 'error')
-        return
-    end
+    lib.triggerCallback('animal_farming:server:getFarmlots', false, function(success, ownedLots)
+        if not success or not ownedLots or #ownedLots == 0 then
+            notify('You need to own a farmlot first!', 'error')
+            return
+        end
+        
+        showAnimalShopMenu(ownedLots)
+    end)
+end
+
+function showAnimalShopMenu(ownedLots)
 
     local options = {}
     for animalType, animalData in pairs(Config.Animals) do
@@ -195,36 +200,42 @@ function getProductInfo(animalType)
 end
 
 function selectLotForAnimal(animalType, price)
-    local ownedLots = lib.callback.await('animal_farming:server:getFarmlots', false)
-    local lotOptions = {}
-    
-    for _, lot in ipairs(ownedLots) do
-        if lot.lot_type == animalType then
-            table.insert(lotOptions, {
-                title = lot.label or ('Lot #' .. lot.id),
-                description = ('Location: %s'):format(vector3(lot.coords.x, lot.coords.y, lot.coords.z)),
-                onSelect = function()
-                    confirmAnimalPurchase(animalType, price, lot.id)
-                end
-            })
+    lib.triggerCallback('animal_farming:server:getFarmlots', false, function(success, ownedLots)
+        if not success or not ownedLots then
+            notify('Failed to get farmlots!', 'error')
+            return
         end
-    end
+        
+        local lotOptions = {}
+        
+        for _, lot in ipairs(ownedLots) do
+            if lot.lot_type == animalType then
+                table.insert(lotOptions, {
+                    title = lot.label or ('Lot #' .. lot.id),
+                    description = ('Location: %s'):format(vector3(lot.coords.x, lot.coords.y, lot.coords.z)),
+                    onSelect = function()
+                        confirmAnimalPurchase(animalType, price, lot.id)
+                    end
+                })
+            end
+        end
 
-    if #lotOptions == 0 then
-        notify('No suitable lots available for this animal type!', 'error')
-        return
-    end
+        if #lotOptions == 0 then
+            notify('No suitable lots available for this animal type!', 'error')
+            return
+        end
 
-    lib.registerMenu({
-        id = 'select_lot_menu',
-        title = 'Select Farmlot',
-        position = 'top-right',
-        options = lotOptions
-    }, function(selected, scrollIndex, args)
+        lib.registerMenu({
+            id = 'select_lot_menu',
+            title = 'Select Farmlot',
+            position = 'top-right',
+            options = lotOptions
+        }, function(selected, scrollIndex, args)
+            lib.showMenu('select_lot_menu')
+        end)
+
         lib.showMenu('select_lot_menu')
     end)
-
-    lib.showMenu('select_lot_menu')
 end
 
 function confirmAnimalPurchase(animalType, price, lotId)
@@ -443,21 +454,23 @@ function checkAnimalStats(animalId)
     local animal = spawnedAnimals[animalId]
     if not animal then return end
 
-    local stats = lib.callback.await('animal_farming:server:getAnimalStatus', false, animalId)
-    
-    if stats then
-        lib.showTextUI(string.format(
-            "Animal: %s (%s)\nHealth: %d%%\nHunger: %d%%\nThirst: %d%%\nStatus: %s",
-            animal.type:upper(), animal.gender:upper(),
-            stats.health, stats.hunger, stats.thirst,
-            stats.status
-        ))
-        
-        -- Hide text after 5 seconds
-        SetTimeout(5000, function()
-            lib.hideTextUI()
-        end)
-    end
+    lib.triggerCallback('animal_farming:server:getAnimalStatus', false, function(success, stats)
+        if success and stats then
+            lib.showTextUI(string.format(
+                "Animal: %s (%s)\nHealth: %d%%\nHunger: %d%%\nThirst: %d%%\nStatus: %s",
+                animal.type:upper(), animal.gender:upper(),
+                stats.health, stats.hunger, stats.thirst,
+                stats.status
+            ))
+            
+            -- Hide text after 5 seconds
+            SetTimeout(5000, function()
+                lib.hideTextUI()
+            end)
+        else
+            notify('Failed to get animal stats', 'error')
+        end
+    end, animalId)
 end
 
 -- ✅ Enhanced butchering with skill game

@@ -32,7 +32,7 @@ client_scripts {
 -- Server files
 server_scripts {
     '@oxmysql/lib/MySQL.lua',
-    'server/*.lua'
+    'server/main.lua'
 }
 
 -- UI files

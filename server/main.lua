@@ -1,7 +1,4 @@
--- Animal Farming (Server) — QBX + ox_lib + ox_inventory + oxmysql
-
-local lib = exports.ox_lib
-local oxmysql = exports.oxmysql
+-- Animal Farming (Server) — QBX + ox_lib + ox_inventory + MySQL
 
 -- NOTE: If your core export name is different, adjust here.
 -- Some servers use 'qbx-core' / 'qb-core' as the resource name.
@@ -15,7 +12,7 @@ local function getPlayer(src)
 end
 
 local function debugPrint(...)
-    if Config.Debug then
+    if Config and Config.Debug then
         print('[animal_farming]', ...)
     end
 end
@@ -29,12 +26,8 @@ local function decode(v)
     return json.decode(v)
 end
 
-local function nowUtc()
-    return os.time(os.date('!*t'))
-end
-
 -- Cache config lookups for speed
-local DB = Config.Database or {
+local DB = {
     farmlots = "animal_farmlots",
     livestock = "animal_livestock",
     water = "animal_water_troughs",
@@ -43,27 +36,43 @@ local DB = Config.Database or {
     death_log = "animal_death_log"
 }
 
+-- Wait for Config to load
+CreateThread(function()
+    while not Config do
+        Wait(100)
+    end
+    
+    -- Update DB table names from config if available
+    if Config.Database then
+        for k, v in pairs(Config.Database) do
+            DB[k] = v
+        end
+    end
+    
+    debugPrint('Database tables configured:', json.encode(DB))
+end)
+
 -- ============================
---         OX_LIB RPCs
+--         OX_LIB CALLBACKS
 -- ============================
 
 -- Get player lots
-lib.callback.register('animal_farming:server:getFarmlots', function(source)
+lib.registerCallback('animal_farming:server:getFarmlots', function(source)
     local player = getPlayer(source)
     if not player then 
         return false, 'player not found' 
     end
 
     local citizenid = player.PlayerData.citizenid
-    local rows = oxmysql:executeSync(string.format([[ 
+    local rows = MySQL.query.await(string.format([[ 
         SELECT * FROM %s WHERE citizenid = ? ORDER BY id ASC 
     ]], DB.farmlots), { citizenid }) or {}
 
     return true, rows
 end)
 
--- Purchase farmlot - FIXED: Corrected callback registration
-lib.callback.register('animal_farming:server:buyFarmlot', function(source, data)
+-- Purchase farmlot
+lib.registerCallback('animal_farming:server:buyFarmlot', function(source, data)
     local player = getPlayer(source)
     if not player then 
         return false, 'player not found' 
@@ -78,8 +87,8 @@ lib.callback.register('animal_farming:server:buyFarmlot', function(source, data)
     end
 
     -- Enforce max lots per player
-    if Config.MaxFarmlotsPerPlayer and type(Config.MaxFarmlotsPerPlayer) == 'number' then
-        local count = oxmysql:scalarSync(string.format([[ 
+    if Config and Config.MaxFarmlotsPerPlayer and type(Config.MaxFarmlotsPerPlayer) == 'number' then
+        local count = MySQL.scalar.await(string.format([[ 
             SELECT COUNT(*) FROM %s WHERE citizenid = ? 
         ]], DB.farmlots), { citizenid }) or 0
 
@@ -104,7 +113,7 @@ lib.callback.register('animal_farming:server:buyFarmlot', function(source, data)
     local label  = (data and data.label)  and data.label  or (lotType .. ' Farmlot')
 
     -- Insert lot into DB
-    local insertId = oxmysql:insertSync(string.format([[ 
+    local insertId = MySQL.insert.await(string.format([[ 
         INSERT INTO %s (citizenid, lot_type, label, coords, bounds, price) 
         VALUES (?, ?, ?, ?, ?, ?) 
     ]], DB.farmlots), {
@@ -120,7 +129,7 @@ lib.callback.register('animal_farming:server:buyFarmlot', function(source, data)
     end
 
     -- Log transaction
-    oxmysql:insert(string.format([[ 
+    MySQL.insert(string.format([[ 
         INSERT INTO %s (citizenid, `type`, ref_id, animal_type, amount, meta) 
         VALUES (?, 'buy_lot', ?, ?, ?, ?) 
     ]], DB.transactions), {
@@ -139,13 +148,12 @@ lib.callback.register('animal_farming:server:buyFarmlot', function(source, data)
     }
 end)
 
--- List animals owned by player (optionally by lot)
-lib.callback.register('animal_farming:server:getAnimals', function(source, filter)
+-- List animals owned by player
+lib.registerCallback('animal_farming:server:getAnimals', function(source, filter)
     local player = getPlayer(source)
     if not player then return false, 'player not found' end
     local citizenid = player.PlayerData.citizenid
 
-    -- FIXED: Replace optional chaining with proper Lua syntax
     local lotId = 0
     if filter and filter.lot_id then
         lotId = tonumber(filter.lot_id) or 0
@@ -159,18 +167,16 @@ lib.callback.register('animal_farming:server:getAnimals', function(source, filte
         query = string.format([[ SELECT * FROM %s WHERE owner_cid = ? ORDER BY id ASC ]], DB.livestock)
         params = { citizenid }
     end
-    local rows = oxmysql:executeSync(query, params)
+    local rows = MySQL.query.await(query, params)
     return true, rows or {}
 end)
 
 -- Buy animal for a specific lot
--- Expects: lot_id, animal_type
-lib.callback.register('animal_farming:server:buyAnimal', function(source, data)
+lib.registerCallback('animal_farming:server:buyAnimal', function(source, data)
     local player = getPlayer(source)
     if not player then return false, 'player not found' end
     local citizenid = player.PlayerData.citizenid
     
-    -- FIXED: Replace optional chaining with proper Lua syntax
     local lotId = 0
     if data and data.lot_id then
         lotId = tonumber(data.lot_id) or 0
@@ -181,11 +187,11 @@ lib.callback.register('animal_farming:server:buyAnimal', function(source, data)
         atype = tostring(data.animal_type)
     end
 
-    local cfg = Config.Animals[atype]
+    local cfg = Config and Config.Animals and Config.Animals[atype]
     if not cfg then return false, 'invalid animal type' end
 
     -- Validate owned lot & type restriction
-    local lot = oxmysql:executeSync(string.format([[
+    local lot = MySQL.query.await(string.format([[
         SELECT * FROM %s WHERE id = ? AND citizenid = ?
     ]], DB.farmlots), { lotId, citizenid })
 
@@ -198,8 +204,8 @@ lib.callback.register('animal_farming:server:buyAnimal', function(source, data)
     end
 
     -- Optional: limit per lot
-    if Config.MaxAnimalsPerLot and type(Config.MaxAnimalsPerLot) == 'number' then
-        local cnt = oxmysql:scalarSync(string.format([[
+    if Config and Config.MaxAnimalsPerLot and type(Config.MaxAnimalsPerLot) == 'number' then
+        local cnt = MySQL.scalar.await(string.format([[
             SELECT COUNT(*) FROM %s WHERE lot_id = ?
         ]], DB.livestock), { lotId }) or 0
         if cnt >= Config.MaxAnimalsPerLot then
@@ -223,7 +229,7 @@ lib.callback.register('animal_farming:server:buyAnimal', function(source, data)
     local stats = cfg.stats or {health=100,hunger=100,thirst=100}
 
     -- Insert animal
-    local animalId = oxmysql:insertSync(string.format([[
+    local animalId = MySQL.insert.await(string.format([[
         INSERT INTO %s (owner_cid, lot_id, animal_type, gender, health, hunger, thirst, spawned, coords)
         VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL)
     ]], DB.livestock), {
@@ -236,7 +242,7 @@ lib.callback.register('animal_farming:server:buyAnimal', function(source, data)
         return false, 'db insert failed'
     end
 
-    oxmysql:insert(string.format([[
+    MySQL.insert(string.format([[
         INSERT INTO %s (citizenid, `type`, ref_id, animal_type, amount)
         VALUES (?, 'buy_animal', ?, ?, ?)
     ]], DB.transactions), { citizenid, animalId, atype, price })
@@ -245,8 +251,8 @@ lib.callback.register('animal_farming:server:buyAnimal', function(source, data)
     return true, { id = animalId, gender = gender, stats = stats }
 end)
 
--- Enhanced feeding system with animations and progressive benefits
-lib.callback.register('animal_farming:server:feedAnimal', function(source, animalId)
+-- Feed animal
+lib.registerCallback('animal_farming:server:feedAnimal', function(source, animalId)
     local src = source
     local player = getPlayer(src)
     if not player then return false, 'player not found' end
@@ -256,7 +262,7 @@ lib.callback.register('animal_farming:server:feedAnimal', function(source, anima
     local citizenid = player.PlayerData.citizenid
 
     -- Verify ownership & alive
-    local rows = oxmysql:executeSync(string.format([[
+    local rows = MySQL.query.await(string.format([[
         SELECT id, owner_cid, is_dead, health, hunger, thirst, animal_type FROM %s WHERE id = ?
     ]], DB.livestock), { animalId })
     if not rows or not rows[1] then return false, 'animal not found' end
@@ -270,14 +276,15 @@ lib.callback.register('animal_farming:server:feedAnimal', function(source, anima
     end
 
     -- Remove feed item
-    local removed = exports.ox_inventory:RemoveItem(src, Config.FeedItem or 'animal_feed', 1)
+    local feedItem = (Config and Config.FeedItem) and Config.FeedItem or 'animal_feed'
+    local removed = exports.ox_inventory:RemoveItem(src, feedItem, 1)
     if not removed then
         return false, 'missing animal feed'
     end
 
     -- Progressive feeding benefits based on animal type
-    local cfg = Config.Animals[a.animal_type] or {}
-    local feedingCfg = Config.Feeding or {}
+    local cfg = Config and Config.Animals and Config.Animals[a.animal_type] or {}
+    local feedingCfg = Config and Config.Feeding or {}
     
     local baseHungerBoost = feedingCfg.hungerBoost or 40
     local baseHealthBoost = feedingCfg.healthBoost or 10
@@ -290,183 +297,15 @@ lib.callback.register('animal_farming:server:feedAnimal', function(source, anima
     local newHunger = math.min(100.0, (tonumber(a.hunger or 0) + hungerBoost))
     local newHealth = math.min(100.0, (tonumber(a.health or 0) + healthBoost))
 
-    oxmysql:update(string.format([[
+    MySQL.update.await(string.format([[
         UPDATE %s SET hunger = ?, health = ?, last_fed = NOW() WHERE id = ?
     ]], DB.livestock), { newHunger, newHealth, animalId })
 
     return true, { hunger = newHunger, health = newHealth }
 end)
 
--- Enhanced product collection with quality system
-lib.callback.register('animal_farming:server:collectProduct', function(source, animalId)
-    local player = getPlayer(source)
-    if not player then return false, 'player not found' end
-    animalId = tonumber(animalId or 0) or 0
-    if animalId <= 0 then return false, 'invalid animal id' end
-    local src = source
-    local citizenid = player.PlayerData.citizenid
-
-    local rows = oxmysql:executeSync(string.format([[
-        SELECT * FROM %s WHERE id = ?
-    ]], DB.livestock), { animalId })
-
-    if not rows or not rows[1] then return false, 'not found' end
-    local a = rows[1]
-    if a.owner_cid ~= citizenid then return false, 'not owner' end
-    if a.is_dead == 1 then return false, 'animal dead' end
-
-    local atype = a.animal_type
-    local cfg = Config.Animals[atype]
-    if not cfg then return false, 'invalid type' end
-
-    -- Enhanced requirements with quality scaling
-    local req = Config.Requirements or { minHealth=50, minHunger=40, minThirst=40 }
-    local currentHealth, currentHunger, currentThirst = tonumber(a.health or 0), tonumber(a.hunger or 0), tonumber(a.thirst or 0)
-    
-    if currentHealth < req.minHealth or currentHunger < req.minHunger or currentThirst < req.minThirst then
-        return false, 'animal is not in condition'
-    end
-
-    -- Quality multiplier based on animal condition
-    local qualityMultiplier = math.min(1.0, (currentHealth * 0.6 + currentHunger * 0.2 + currentThirst * 0.2) / 100)
-
-    -- Determine product + cooldown
-    local productItem, minY, maxY, cooldown
-    if atype == 'cow' then
-        if a.gender ~= 'female' then return false, 'male cows do not produce milk' end
-        local p = cfg.products and cfg.products.female and cfg.products.female.milk
-        if not p then return false, 'no product defined' end
-        productItem = p.item or 'milk'
-        minY, maxY = tonumber(p.minYield or 1), tonumber(p.maxYield or 1)
-        cooldown = tonumber(p.cooldown or (3*24*60*60))
-    elseif atype == 'chicken' then
-        local p = cfg.products and cfg.products.eggs
-        if not p then return false, 'no product defined' end
-        productItem = p.item or 'eggs'
-        minY, maxY = tonumber(p.minYield or 1), tonumber(p.maxYield or 1)
-        cooldown = tonumber(p.cooldown or (30*60))
-    elseif atype == 'pig' then
-        local p = cfg.products and cfg.products.meat
-        if not p then return false, 'no product defined' end
-        productItem = p.item or 'raw_pork'
-        minY, maxY = tonumber(p.minYield or 1), tonumber(p.maxYield or 1)
-        cooldown = tonumber(p.cooldown or (2*60*60))
-    else
-        return false, 'no product for this animal'
-    end
-
-    -- Cooldown check
-    local last = a.last_product
-    if last then
-        local secondsSince = oxmysql:scalarSync('SELECT TIMESTAMPDIFF(SECOND, ?, NOW())', { last }) or 0
-        if secondsSince < cooldown then
-            local remain = cooldown - secondsSince
-            return false, ('cooldown: %ds remaining'):format(remain)
-        end
-    end
-
-    -- Quality-based yield calculation
-    local baseAmount = math.random(minY, maxY)
-    local qualityAmount = math.floor(baseAmount * qualityMultiplier)
-    local amount = math.max(1, qualityAmount)
-
-    -- Give item with quality metadata
-    local metadata = {
-        quality = math.floor(qualityMultiplier * 100),
-        source = ('%s_%s'):format(atype, a.gender),
-        collected = os.date('%Y-%m-%d %H:%M:%S')
-    }
-
-    local added = exports.ox_inventory:AddItem(src, productItem, amount, metadata)
-    if not added then
-        return false, 'inventory full'
-    end
-
-    -- Update last_product + log with quality info
-    oxmysql:update(string.format([[
-        UPDATE %s SET last_product = NOW() WHERE id = ?
-    ]], DB.livestock), { animalId })
-
-    oxmysql:insert(string.format([[
-        INSERT INTO %s (animal_id, owner_cid, product, amount, quality, at_health, at_hunger, at_thirst)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ]], DB.production_log), { 
-        animalId, citizenid, productItem, amount, math.floor(qualityMultiplier * 100), 
-        currentHealth, currentHunger, currentThirst 
-    })
-
-    return true, { 
-        item = productItem, 
-        amount = amount, 
-        quality = math.floor(qualityMultiplier * 100) 
-    }
-end)
-
--- Enhanced butchering system with skill-based yields
-lib.callback.register('animal_farming:server:butcherAnimal', function(source, animalId, skillLevel)
-    local player = getPlayer(source)
-    if not player then return false, 'player not found' end
-    animalId = tonumber(animalId or 0) or 0
-    if animalId <= 0 then return false, 'invalid animal id' end
-
-    local src = source
-    local citizenid = player.PlayerData.citizenid
-
-    local rows = oxmysql:executeSync(string.format([[
-        SELECT * FROM %s WHERE id = ?
-    ]], DB.livestock), { animalId })
-    if not rows or not rows[1] then return false, 'not found' end
-    local a = rows[1]
-    if a.owner_cid ~= citizenid then return false, 'not owner' end
-    if tonumber(a.is_dead or 0) ~= 1 then return false, 'animal must be dead' end
-
-    -- Check knife
-    local required = (Config.Butchering and Config.Butchering.requiredItem) or 'knife'
-    if exports.ox_inventory:GetItem(src, required, false, true) < 1 then
-        return false, 'missing knife'
-    end
-
-    local byType = Config.Butchering and Config.Butchering.yields and Config.Butchering.yields[a.animal_type]
-    if not byType then return false, 'no yield configured' end
-
-    -- Skill-based yield calculation
-    local skillMultiplier = math.min(2.0, 1.0 + (tonumber(skillLevel or 0) * 0.1))
-    local baseMin, baseMax = tonumber(byType.min or 1), tonumber(byType.max or 1)
-    local minY = math.floor(baseMin * skillMultiplier)
-    local maxY = math.floor(baseMax * skillMultiplier)
-    
-    local item = byType.item or 'raw_meat'
-    local amount = math.random(minY, maxY)
-    if amount <= 0 then amount = 1 end
-
-    -- Quality metadata based on skill
-    local metadata = {
-        butcher_skill = tonumber(skillLevel or 0),
-        source = a.animal_type,
-        butchered = os.date('%Y-%m-%d %H:%M:%S')
-    }
-
-    -- Give item
-    local ok = exports.ox_inventory:AddItem(src, item, amount, metadata)
-    if not ok then return false, 'inventory full' end
-
-    -- Log & cleanup
-    oxmysql:insert(string.format([[
-        INSERT INTO %s (animal_id, owner_cid, cause, by_cid, yields_json, skill_level)
-        VALUES (?, ?, 'butchered', ?, ?, ?)
-    ]], DB.death_log), { 
-        animalId, citizenid, citizenid, encode({ item = item, amount = amount }), skillLevel 
-    })
-
-    -- Remove from active table
-    oxmysql:execute(string.format('DELETE FROM %s WHERE id = ?', DB.livestock), { animalId })
-
-    debugPrint(('Player %s butchered animal #%d yielding %dx %s (skill: %d)'):format(citizenid, animalId, amount, item, skillLevel))
-    return true, { item = item, amount = amount, skill = skillLevel }
-end)
-
--- Animal status monitoring system
-lib.callback.register('animal_farming:server:getAnimalStatus', function(source, animalId)
+-- Get animal status
+lib.registerCallback('animal_farming:server:getAnimalStatus', function(source, animalId)
     local player = getPlayer(source)
     if not player then return false, 'player not found' end
     animalId = tonumber(animalId or 0) or 0
@@ -474,7 +313,7 @@ lib.callback.register('animal_farming:server:getAnimalStatus', function(source, 
 
     local citizenid = player.PlayerData.citizenid
 
-    local rows = oxmysql:executeSync(string.format([[
+    local rows = MySQL.query.await(string.format([[
         SELECT * FROM %s WHERE id = ? AND owner_cid = ?
     ]], DB.livestock), { animalId, citizenid })
     
@@ -490,99 +329,27 @@ lib.callback.register('animal_farming:server:getAnimalStatus', function(source, 
     elseif hunger < 30 or thirst < 30 then status = 'neglected'
     end
 
-    -- Calculate time since last fed/produced
-    local lastFed = animal.last_fed and oxmysql:scalarSync('SELECT TIMESTAMPDIFF(MINUTE, ?, NOW())', { animal.last_fed }) or 'unknown'
-    local lastProduct = animal.last_product and oxmysql:scalarSync('SELECT TIMESTAMPDIFF(MINUTE, ?, NOW())', { animal.last_product }) or 'unknown'
-
     return true, {
         status = status,
         health = health,
         hunger = hunger,
         thirst = thirst,
         gender = animal.gender,
-        lastFed = lastFed,
-        lastProduct = lastProduct,
         isDead = tonumber(animal.is_dead or 0) == 1
     }
 end)
 
--- Bulk operations for multiple animals
-lib.callback.register('animal_farming:server:bulkFeedAnimals', function(source, lotId)
-    local player = getPlayer(source)
-    if not player then return false, 'player not found' end
-    local citizenid = player.PlayerData.citizenid
-    lotId = tonumber(lotId or 0) or 0
-
-    -- Get all animals in the lot that need feeding
-    local animals = oxmysql:executeSync(string.format([[
-        SELECT id, hunger FROM %s 
-        WHERE owner_cid = ? AND lot_id = ? AND is_dead = 0 AND hunger < 90
-    ]], DB.livestock), { citizenid, lotId }) or {}
-
-    if #animals == 0 then
-        return false, 'no animals need feeding'
-    end
-
-    -- Calculate required feed
-    local feedNeeded = #animals
-    local feedAvailable = exports.ox_inventory:GetItem(source, Config.FeedItem or 'animal_feed', false, true) or 0
-
-    if feedAvailable < feedNeeded then
-        return false, ('need %d feed, only have %d'):format(feedNeeded, feedAvailable)
-    end
-
-    -- Remove feed items
-    local removed = exports.ox_inventory:RemoveItem(source, Config.FeedItem or 'animal_feed', feedNeeded)
-    if not removed then
-        return false, 'failed to remove feed'
-    end
-
-    -- Feed all animals
-    local fedCount = 0
-    for _, animal in ipairs(animals) do
-        local newHunger = math.min(100, tonumber(animal.hunger or 0) + (Config.Feeding.hungerBoost or 40))
-        oxmysql:update(string.format([[
-            UPDATE %s SET hunger = ?, last_fed = NOW() WHERE id = ?
-        ]], DB.livestock), { newHunger, animal.id })
-        fedCount = fedCount + 1
-    end
-
-    return true, { fedCount = fedCount, feedUsed = feedNeeded }
+-- Placeholder callbacks for features not fully implemented yet
+lib.registerCallback('animal_farming:server:getTroughs', function(source, lotId)
+    return true, {} -- Return empty troughs for now
 end)
 
--- Admin management system
-lib.callback.register('animal_farming:server:adminGetAllAnimals', function(source)
-    local player = getPlayer(source)
-    if not player then return false, 'player not found' end
-    
-    -- Add admin check here
-    -- if not IsPlayerAceAllowed(source, 'animal_farming.admin') then return false, 'no permission' end
-
-    local rows = oxmysql:executeSync(string.format([[
-        SELECT l.*, f.label as farm_name, f.citizenid as owner_citizenid 
-        FROM %s l 
-        LEFT JOIN %s f ON l.lot_id = f.id 
-        ORDER BY l.owner_cid, l.lot_id
-    ]], DB.livestock, DB.farmlots))
-
-    return true, rows or {}
+lib.registerCallback('animal_farming:server:placeTrough', function(source, lotId, coords)
+    return false, 'Feature not implemented yet'
 end)
 
--- Admin: heal all animals in a lot
-lib.callback.register('animal_farming:server:adminHealLot', function(source, lotId)
-    local player = getPlayer(source)
-    if not player then return false, 'player not found' end
-    
-    -- Add admin check here
-    lotId = tonumber(lotId or 0) or 0
-
-    local affected = oxmysql:update(string.format([[
-        UPDATE %s 
-        SET health = 100, hunger = 100, thirst = 100, updated_at = NOW() 
-        WHERE lot_id = ? AND is_dead = 0
-    ]], DB.livestock), { lotId })
-
-    return true, { affected = affected }
+lib.registerCallback('animal_farming:server:adminGetAllAnimals', function(source)
+    return false, 'Admin feature not implemented yet'
 end)
 
 -- ============================
@@ -592,356 +359,122 @@ end)
 -- SERVER EVENTS (using RegisterNetEvent)
 RegisterNetEvent('animal_farming:server:buyFarmlot', function(data)
     local src = source
-    local success, result = lib.callback.await('animal_farming:server:buyFarmlot', src, data)
-    
-    if success then
-        TriggerClientEvent('ox_lib:notify', src, {
-            type = 'success',
-            description = 'Farmlot purchased successfully!'
-        })
-        -- Update client farmlots
-        TriggerClientEvent('animal_farming:client:updateFarmlots', src, result)
-    else
-        TriggerClientEvent('ox_lib:notify', src, {
-            type = 'error',
-            description = result or 'Failed to purchase farmlot'
-        })
-    end
+    lib.triggerCallback('animal_farming:server:buyFarmlot', src, function(success, result)
+        if success then
+            TriggerClientEvent('ox_lib:notify', src, {
+                type = 'success',
+                description = 'Farmlot purchased successfully!'
+            })
+        else
+            TriggerClientEvent('ox_lib:notify', src, {
+                type = 'error',
+                description = result or 'Failed to purchase farmlot'
+            })
+        end
+    end, data)
 end)
 
 RegisterNetEvent('animal_farming:server:buyAnimal', function(data)
     local src = source
-    local success, result = lib.callback.await('animal_farming:server:buyAnimal', src, data)
-    
-    if success then
-        TriggerClientEvent('ox_lib:notify', src, {
-            type = 'success',
-            description = 'Animal purchased successfully!'
-        })
-        -- Spawn the animal
-        local spawnData = {
-            id = result.id,
-            type = data.animal_type,
-            coords = vector3(0, 0, 0), -- Should be set based on lot coords
-            gender = result.gender,
-            stats = result.stats
-        }
-        TriggerClientEvent('animal_farming:client:spawnAnimal', src, spawnData)
-    else
-        TriggerClientEvent('ox_lib:notify', src, {
-            type = 'error',
-            description = result or 'Failed to purchase animal'
-        })
-    end
+    lib.triggerCallback('animal_farming:server:buyAnimal', src, function(success, result)
+        if success then
+            TriggerClientEvent('ox_lib:notify', src, {
+                type = 'success',
+                description = 'Animal purchased successfully!'
+            })
+        else
+            TriggerClientEvent('ox_lib:notify', src, {
+                type = 'error',
+                description = result or 'Failed to purchase animal'
+            })
+        end
+    end, data)
 end)
 
 RegisterNetEvent('animal_farming:server:feedAnimal', function(animalId)
     local src = source
-    local success, result = lib.callback.await('animal_farming:server:feedAnimal', src, animalId)
-    
-    if success then
-        TriggerClientEvent('ox_lib:notify', src, {
-            type = 'success',
-            description = 'Animal fed successfully!'
-        })
-        TriggerClientEvent('animal_farming:client:updateStats', src, animalId, result)
-    else
-        TriggerClientEvent('ox_lib:notify', src, {
-            type = 'error',
-            description = result or 'Failed to feed animal'
-        })
-    end
-end)
-
-RegisterNetEvent('animal_farming:server:collectProduct', function(animalId)
-    local src = source
-    local success, result = lib.callback.await('animal_farming:server:collectProduct', src, animalId)
-    
-    if success then
-        TriggerClientEvent('ox_lib:notify', src, {
-            type = 'success',
-            description = ('Collected %dx %s (Quality: %d%%)'):format(result.amount, result.item, result.quality)
-        })
-    else
-        TriggerClientEvent('ox_lib:notify', src, {
-            type = 'error',
-            description = result or 'Failed to collect product'
-        })
-    end
-end)
-
-RegisterNetEvent('animal_farming:server:butcherAnimal', function(animalId, skillLevel)
-    local src = source
-    local success, result = lib.callback.await('animal_farming:server:butcherAnimal', src, animalId, skillLevel)
-    
-    if success then
-        TriggerClientEvent('ox_lib:notify', src, {
-            type = 'success',
-            description = ('Butchered animal! Got %dx %s'):format(result.amount, result.item)
-        })
-        TriggerClientEvent('animal_farming:client:despawnAnimal', src, animalId)
-    else
-        TriggerClientEvent('ox_lib:notify', src, {
-            type = 'error',
-            description = result or 'Failed to butcher animal'
-        })
-    end
+    lib.triggerCallback('animal_farming:server:feedAnimal', src, function(success, result)
+        if success then
+            TriggerClientEvent('ox_lib:notify', src, {
+                type = 'success',
+                description = 'Animal fed successfully!'
+            })
+            TriggerClientEvent('animal_farming:client:updateStats', src, animalId, result)
+        else
+            TriggerClientEvent('ox_lib:notify', src, {
+                type = 'error',
+                description = result or 'Failed to feed animal'
+            })
+        end
+    end, animalId)
 end)
 
 RegisterNetEvent('animal_farming:server:requestFarmlots', function()
     local src = source
-    local success, lots = lib.callback.await('animal_farming:server:getFarmlots', src)
-    if success then
-        TriggerClientEvent('animal_farming:client:updateFarmlots', src, lots)
-    end
-end)
-
-RegisterNetEvent('animal_farming:server:updateAnimalPosition', function(animalId, coords)
-    local src = source
-    local player = getPlayer(src)
-    if not player then return end
-    
-    animalId = tonumber(animalId or 0) or 0
-    if animalId <= 0 then return end
-    
-    -- Update position in database
-    oxmysql:update(string.format([[
-        UPDATE %s SET coords = ? WHERE id = ? AND owner_cid = ?
-    ]], DB.livestock), { json.encode(coords), animalId, player.PlayerData.citizenid })
+    lib.triggerCallback('animal_farming:server:getFarmlots', src, function(success, lots)
+        if success then
+            TriggerClientEvent('animal_farming:client:updateFarmlots', src, lots)
+        end
+    end)
 end)
 
 -- ============================
---   LOGIN / LOGOUT HANDLERS
+--   STATS DECAY SYSTEM
 -- ============================
 
--- On player loaded: mark their animals as "should spawn" and send to client to spawn.
-AddEventHandler('QBCore:Server:PlayerLoaded', function(Player)
-    -- FIXED: Replace optional chaining with proper Lua syntax
-    local citizenid
-    if Player and Player.PlayerData and Player.PlayerData.citizenid then
-        citizenid = Player.PlayerData.citizenid
-    end
-    if not citizenid then return end
-
-    -- Get animals to spawn (owned & alive)
-    local animals = oxmysql:executeSync(string.format([[
-        SELECT * FROM %s WHERE owner_cid = ? AND is_dead = 0
-    ]], DB.livestock), { citizenid }) or {}
-
-    -- Mark spawned flag false (client will flip true as they spawn them)
-    oxmysql:update(string.format([[
-        UPDATE %s SET spawned = 0 WHERE owner_cid = ? AND is_dead = 0
-    ]], DB.livestock), { citizenid })
-
-    debugPrint(('Player %s loaded with %d animals'):format(citizenid, #animals))
-
-    -- Let client handle actual entity spawn
-    local src = Player.PlayerData.source
-    TriggerClientEvent('animal_farming:client:spawnOwnedAnimals', src, animals)
-end)
-
--- On player unload: mark animals spawned=0 (client should despawn entities)
-AddEventHandler('QBCore:Server:OnPlayerUnload', function(src)
-    local player = getPlayer(src)
-    if not player then return end
-    local citizenid = player.PlayerData.citizenid
-    oxmysql:update(string.format([[
-        UPDATE %s SET spawned = 0 WHERE owner_cid = ?
-    ]], DB.livestock), { citizenid })
-    debugPrint(('Player %s unloaded; animals marked unspawned'):format(citizenid))
-end)
-
--- Client informs server when a specific animal has been successfully spawned/despawned client-side
-RegisterNetEvent('animal_farming:server:setSpawned', function(animalId, spawned, coords)
-    local src = source
-    local player = getPlayer(src)
-    if not player then return end
-    animalId = tonumber(animalId or 0) or 0
-    if animalId <= 0 then return end
-
-    -- quick ownership check
-    local rows = oxmysql:executeSync(string.format('SELECT owner_cid FROM %s WHERE id = ?', DB.livestock), { animalId })
-    if not rows or not rows[1] then return end
-    if rows[1].owner_cid ~= player.PlayerData.citizenid then return end
-
-    oxmysql:update(string.format([[
-        UPDATE %s SET spawned = ?, coords = ?, updated_at = NOW() WHERE id = ?
-    ]], DB.livestock), { (spawned and 1 or 0), coords and encode(coords) or nil, animalId })
-end)
-
--- ============================
---   STATS DECAY + WATER TROUGH
--- ============================
-
--- Enhanced stat decay system with environmental factors
+-- Simplified stat decay system
 CreateThread(function()
     while true do
-        Wait(60 * 1000)
+        Wait(60 * 1000) -- Run every minute
 
-        local hdec = (Config.StatDecay and tonumber(Config.StatDecay.hunger or 1)) or 1
-        local tdec = (Config.StatDecay and tonumber(Config.StatDecay.thirst or 1)) or 1
-        local hldec = (Config.StatDecay and tonumber(Config.StatDecay.health or 0.5)) or 0.5
+        -- Only run if Config is loaded
+        if Config and Config.StatDecay then
+            local hdec = tonumber(Config.StatDecay.hunger or 1) or 1
+            local tdec = tonumber(Config.StatDecay.thirst or 1) or 1
+            local hldec = tonumber(Config.StatDecay.health or 0.5) or 0.5
 
-        -- Environmental factors (season/weather could be implemented here)
-        local weatherMultiplier = 1.0 -- Could be adjusted based on server weather
+            -- Hunger/thirst drop
+            MySQL.update(string.format([[
+                UPDATE %s
+                SET hunger = GREATEST(hunger - ?, 0),
+                    thirst = GREATEST(thirst - ?, 0)
+                WHERE is_dead = 0
+            ]], DB.livestock), { hdec, tdec })
 
-        -- Hunger/thirst drop with environmental factors
-        oxmysql:execute(string.format([[
-            UPDATE %s
-            SET hunger = GREATEST(hunger - ?, 0),
-                thirst = GREATEST(thirst - ?, 0),
-                updated_at = NOW()
-            WHERE is_dead = 0
-        ]], DB.livestock), { hdec * weatherMultiplier, tdec * weatherMultiplier })
+            -- Health decay where needed
+            MySQL.update(string.format([[
+                UPDATE %s
+                SET health = GREATEST(health - ?, 0)
+                WHERE is_dead = 0 AND (hunger <= 0 OR thirst <= 0)
+            ]], DB.livestock), { hldec })
 
-        -- Health decay where needed
-        oxmysql:execute(string.format([[
-            UPDATE %s
-            SET health = GREATEST(health - ?, 0),
-                updated_at = NOW()
-            WHERE is_dead = 0 AND (hunger <= 0 OR thirst <= 0)
-        ]], DB.livestock), { hldec * weatherMultiplier })
-
-        -- Mark animals dead (health <= 0)
-        local deadIds = oxmysql:executeSync(string.format([[
-            SELECT id, owner_cid FROM %s WHERE is_dead = 0 AND health <= 0
-        ]], DB.livestock))
-        if deadIds and #deadIds > 0 then
-            local ids = {}
-            for _, r in ipairs(deadIds) do ids[#ids+1] = r.id end
-            oxmysql:execute(string.format('UPDATE %s SET is_dead = 1 WHERE id IN (%s)', DB.livestock, table.concat(ids, ',')))
-            for _, r in ipairs(deadIds) do
-                oxmysql:insert(string.format([[
-                    INSERT INTO %s (animal_id, owner_cid, cause)
-                    VALUES (?, ?, 'neglect')
-                ]], DB.death_log), { r.id, r.owner_cid })
-            end
-            debugPrint(('Marked %d animals as dead due to neglect'):format(#deadIds))
-        end
-
-        -- Water trough: passive hydration tick
-        if Config.WaterTrough and Config.WaterTrough.enabled then
-            local boost = tonumber(Config.WaterTrough.hydrationBoost or 5) or 5
-            local every = tonumber(Config.WaterTrough.tickInterval or 60) or 60
-            if every == 60 then
-                oxmysql:execute(string.format([[
-                    UPDATE %s l
-                    JOIN %s t ON t.lot_id = l.lot_id
-                    SET l.thirst = LEAST(l.thirst + ?, 100),
-                        l.updated_at = NOW()
-                    WHERE l.is_dead = 0 AND t.water_level > 0
-                ]], DB.livestock, DB.water), { boost })
-
-                oxmysql:execute(string.format([[
-                    UPDATE %s SET water_level = GREATEST(water_level - 1, 0), last_refilled = NOW()
-                    WHERE water_level > 0
-                ]], DB.water))
-            end
+            -- Mark animals dead (health <= 0)
+            MySQL.update(string.format([[
+                UPDATE %s SET is_dead = 1 WHERE is_dead = 0 AND health <= 0
+            ]], DB.livestock))
         end
     end
 end)
 
 -- ============================
---   TROUGH MANAGEMENT
+--   INITIALIZATION
 -- ============================
 
--- Get/Set troughs per lot
-lib.callback.register('animal_farming:server:getTroughs', function(source, lotId)
-    lotId = tonumber(lotId or 0) or 0
-    if lotId <= 0 then return true, {} end
-    local rows = oxmysql:executeSync(string.format('SELECT * FROM %s WHERE lot_id = ?', DB.water), { lotId }) or {}
-    return true, rows
-end)
-
-lib.callback.register('animal_farming:server:placeTrough', function(source, lotId, coords)
-    local player = getPlayer(source)
-    if not player then return false, 'player not found' end
-    local citizenid = player.PlayerData.citizenid
-    lotId = tonumber(lotId or 0) or 0
-    if lotId <= 0 then return false, 'invalid lot' end
-
-    -- Ownership check
-    local lot = oxmysql:executeSync(string.format('SELECT * FROM %s WHERE id = ? AND citizenid = ?', DB.farmlots), { lotId, citizenid })
-    if not lot or not lot[1] then return false, 'not your lot' end
-
-    -- Check max troughs per lot
-    local troughCount = oxmysql:scalarSync(string.format('SELECT COUNT(*) FROM %s WHERE lot_id = ?', DB.water), { lotId }) or 0
-    if troughCount >= (Config.MaxTroughsPerLot or 3) then
-        return false, 'max troughs reached for this lot'
-    end
-
-    local id = oxmysql:insertSync(string.format('INSERT INTO %s (lot_id, coords, water_level) VALUES (?, ?, 100)', DB.water), { lotId, encode(coords) })
-    if not id then return false, 'db failed' end
-    return true, { id = id, water_level = 100 }
-end)
-
-RegisterNetEvent('animal_farming:server:refillTrough', function(troughId, amount)
-    local src = source
-    local player = getPlayer(src)
-    if not player then return end
-
-    troughId = tonumber(troughId or 0) or 0
-    local amt = tonumber(amount or 100) or 100
-    if troughId <= 0 then return end
-
-    oxmysql:execute(string.format([[
-        UPDATE %s SET water_level = LEAST(water_level + ?, 100), last_refilled = NOW() WHERE id = ?
-    ]], DB.water), { amt, troughId })
-end)
-
--- ============================
---   ADMIN / DEBUG COMMANDS
--- ============================
-
-lib.addCommand('af_list', {
-    help = 'List your animals',
-}, function(source, args)
-    local player = getPlayer(source)
-    if not player then return end
-    local ok, animals = lib.callback.await('animal_farming:server:getAnimals', source, {})
-    if not ok then
-        TriggerClientEvent('ox_lib:notify', source, { type = 'error', description = tostring(animals) })
-        return
-    end
-    TriggerClientEvent('ox_lib:notify', source, { type = 'inform', description = ('You have %d animals.'):format(#animals) })
-end)
-
-lib.addCommand('af_stats', {
-    help = 'Check animal stats',
-}, function(source, args)
-    local player = getPlayer(source)
-    if not player then return end
-    -- Implementation for checking specific animal stats
-end)
-
--- ============================
---   SAFETY GUARDS
--- ============================
-
--- Ensure config defaults exist to avoid nil issues
-Config.Feeding = Config.Feeding or { hungerBoost = 40, healthBoost = 10, animationTime = 5 }
-Config.Requirements = Config.Requirements or { minHealth = 50, minHunger = 40, minThirst = 40 }
-Config.WaterTrough = Config.WaterTrough or { enabled = true, hydrationBoost = 5, tickInterval = 60 }
-Config.StatDecay = Config.StatDecay or { hunger = 1, thirst = 1, health = 0.5 }
-Config.Butchering = Config.Butchering or { requiredItem = 'knife', yields = {} }
-Config.MaxTroughsPerLot = Config.MaxTroughsPerLot or 3
-
--- Initialize database tables if they don't exist
 CreateThread(function()
-    Wait(5000) -- Wait for resources to load
-    debugPrint('Initializing animal farming database...')
-    -- You could add table creation queries here if needed
-end)
-
--- Emergency recovery system for stuck animals
-lib.callback.register('animal_farming:server:recoverAnimals', function(source)
-    local player = getPlayer(source)
-    if not player then return false, 'player not found' end
-    local citizenid = player.PlayerData.citizenid
-
-    local recovered = oxmysql:update(string.format([[
-        UPDATE %s SET spawned = 0 WHERE owner_cid = ? AND spawned = 1
-    ]], DB.livestock), { citizenid })
-
-    return true, { recovered = recovered }
+    Wait(2000) -- Wait for resources to load
+    
+    print('[animal_farming] Animal Farming system loaded successfully')
+    
+    -- Test database connection after a delay
+    Wait(3000)
+    
+    local success, result = pcall(function()
+        return MySQL.scalar.await('SELECT 1 as test')
+    end)
+    
+    if success and result == 1 then
+        print('[animal_farming] Database connection: OK')
+    else
+        print('[animal_farming] WARNING: Database connection failed - please check your database setup')
+    end
 end)

@@ -60,7 +60,7 @@ RegisterNetEvent('animal_farming:client:openAnimalUI', function(animalId, animal
     if not animal then return end
     
     -- Get current stats from server
-    lib.callback.await('animal_farming:server:getAnimalStatus', false, animalId):next(function(success, stats)
+    lib.triggerCallback('animal_farming:server:getAnimalStatus', false, function(success, stats)
         if success then
             SendNUIMessage({
                 action = 'show',
@@ -79,7 +79,7 @@ RegisterNetEvent('animal_farming:client:openAnimalUI', function(animalId, animal
             
             SetNuiFocus(true, true)
         end
-    end)
+    end, animalId)
 end)
 
 -- Utility functions for UI colors
@@ -139,7 +139,7 @@ end)
 
 -- Water trough management
 RegisterNetEvent('animal_farming:client:manageTroughs', function(lotId)
-    lib.callback.await('animal_farming:server:getTroughs', false, lotId):next(function(success, troughs)
+    lib.triggerCallback('animal_farming:server:getTroughs', false, function(success, troughs)
         if not success then
             notify('Failed to get trough data', 'error')
             return
@@ -180,7 +180,7 @@ RegisterNetEvent('animal_farming:client:manageTroughs', function(lotId)
         })
         
         lib.showMenu('trough_management')
-    end)
+    end, lotId)
 end)
 
 function refillTrough(troughId)
@@ -200,14 +200,14 @@ end
 function placeTrough(lotId)
     local playerCoords = GetEntityCoords(PlayerPedId())
     
-    lib.callback.await('animal_farming:server:placeTrough', false, lotId, playerCoords):next(function(success, result)
+    lib.triggerCallback('animal_farming:server:placeTrough', false, function(success, result)
         if success then
             notify('Water trough placed successfully!', 'success')
             -- Could add a physical prop here if desired
         else
             notify(result or 'Failed to place trough', 'error')
         end
-    end)
+    end, lotId, playerCoords)
 end
 
 -- Admin features (if player has permissions)
@@ -250,7 +250,7 @@ RegisterNetEvent('animal_farming:client:openAdminMenu', function()
 end)
 
 function openAdminAnimalList()
-    lib.callback.await('animal_farming:server:adminGetAllAnimals', false):next(function(success, animals)
+    lib.triggerCallback('animal_farming:server:adminGetAllAnimals', false, function(success, animals)
         if not success then
             notify('Failed to get animal data', 'error')
             return
