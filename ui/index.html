@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Animal Status</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="animal-status" class="hidden">
+        <div class="status-container">
+            <div class="header">
+                <h2 id="animal-type">ANIMAL TYPE</h2>
+                <span id="animal-gender">Gender</span>
+            </div>
+            
+            <div class="stats">
+                <div class="stat">
+                    <div class="stat-label">HEALTH</div>
+                    <div class="stat-bar">
+                        <div class="stat-fill" id="health-bar"></div>
+                    </div>
+                    <div class="stat-value" id="health-value">100%</div>
+                </div>
+                
+                <div class="stat">
+                    <div class="stat-label">HUNGER</div>
+                    <div class="stat-bar">
+                        <div class="stat-fill" id="hunger-bar"></div>
+                    </div>
+                    <div class="stat-value" id="hunger-value">100%</div>
+                </div>
+                
+                <div class="stat">
+                    <div class="stat-label">THIRST</div>
+                    <div class="stat-bar">
+                        <div class="stat-fill" id="thirst-bar"></div>
+                    </div>
+                    <div class="stat-value" id="thirst-value">100%</div>
+                </div>
+            </div>
+            
+            <div id="production-section" class="production hidden">
+                <div class="stat-label">PRODUCTION STATUS</div>
+                <div id="production-status" class="production-status">Ready</div>
+            </div>
+            
+            <div class="footer">
+                <p>Press ESC to close</p>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
